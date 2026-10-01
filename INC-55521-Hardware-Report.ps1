@@ -46,6 +46,18 @@ function Add-Field {
 }
 
 # ---------------------------------------------------------------------
+#  Helper: convert US-ASCII byte arrays (from WMI) to text
+# ---------------------------------------------------------------------
+function ConvertFrom-AsciiBytes {
+    param([byte[]]$Bytes)
+    if ($Bytes) {
+        ([System.Text.Encoding]::ASCII.GetString($Bytes) -replace '\0', '').Trim()
+    } else {
+        "N/A"
+    }
+}
+
+# ---------------------------------------------------------------------
 #  Helper: gather installed software with installation dates
 # ---------------------------------------------------------------------
 function Get-InstalledSoftware {
@@ -100,6 +112,22 @@ $gpus  = @(Get-CimInstance Win32_VideoController |
 
 $disks = @(Get-CimInstance Win32_DiskDrive | Sort-Object Index)
 
+# --- Monitors ---------------------------------------------------------
+$monitors = Get-CimInstance -Namespace root\wmi -ClassName WmiMonitorID -ErrorAction SilentlyContinue
+
+# --- Docking stations -------------------------------------------------
+$docks = Get-PnpDevice -PresentOnly -ErrorAction SilentlyContinue |
+    Where-Object {
+        $_.FriendlyName -like "*Dock*" -or
+        $_.FriendlyName -like "*Thunderbolt*" -or
+        $_.Manufacturer -match "DisplayLink|CalDigit|Plugable"
+    } |
+    Select-Object -Unique -Property FriendlyName, Manufacturer, InstanceId
+
+# Fallback WMI docking station (if no PnP dock found)
+$wmiDock = Get-CimInstance -ClassName Win32_SystemEnclosure |
+    Where-Object { $_.ChassisTypes -contains 12 }
+
 # Embedded OEM key lives in the ACPI MSDM table
 $oemKey = (Get-CimInstance -ClassName SoftwareLicensingService -Namespace 'root\cimv2').OA3xOriginalProductKey
 if ([string]::IsNullOrWhiteSpace($oemKey)) {
@@ -153,6 +181,57 @@ foreach ($d in $disks) {
     $sizeGB = [Math]::Round($d.Size / 1GB, 2)
     Add-Line ('  - Drive: {0} | Size: {1} GB | Interface: {2}' -f
               $d.Model, $sizeGB, $d.Interface)
+}
+
+# --- Monitors ---------------------------------------------------------
+Add-Section 'MONITORS'
+if ($monitors) {
+    foreach ($mon in $monitors) {
+        $manufacturer = ConvertFrom-AsciiBytes -Bytes $mon.ManufacturerName
+        $model        = ConvertFrom-AsciiBytes -Bytes $mon.UserFriendlyName
+        $serial       = ConvertFrom-AsciiBytes -Bytes $mon.SerialNumberID
+
+        $type = if ($model -match "Internal|Built-in|Integrated") {
+            "Integrated/Laptop Display"
+        } else {
+            "External Monitor"
+        }
+
+        Add-Line ('  - Vendor: {0} | Model: {1} | Type: {2} | Serial: {3}' -f
+                  $manufacturer, $model, $type, $serial)
+    }
+} else {
+    Add-Line '  (No monitors detected or WMI access restricted)'
+}
+
+# --- Docking stations -------------------------------------------------
+Add-Section 'DOCKING STATIONS'
+if ($docks) {
+    foreach ($dock in $docks) {
+        $serial = if ($dock.InstanceId -match '\\([A-Za-z0-9_-]+)$') {
+            $matches[1]
+        } else {
+            "N/A"
+        }
+
+        $dockType = if ($dock.FriendlyName -match "Thunderbolt") {
+            "Thunderbolt Dock"
+        } elseif ($dock.FriendlyName -match "USB-C") {
+            "USB-C Dock"
+        } else {
+            "USB / Universal Dock"
+        }
+
+        Add-Line ('  - Vendor: {0} | Model: {1} | Type: {2} | Device ID/Serial: {3}' -f
+                  $dock.Manufacturer, $dock.FriendlyName, $dockType, $serial)
+    }
+} elseif ($wmiDock) {
+    foreach ($d in $wmiDock) {
+        Add-Line ('  - Vendor: {0} | Model: {1} | Serial: {2}' -f
+                  $d.Manufacturer, "Generic WMI Docking Station", $d.SerialNumber)
+    }
+} else {
+    Add-Line '  (No dedicated docking station recognized)'
 }
 
 # --- Installed software ----------------------------------------------
